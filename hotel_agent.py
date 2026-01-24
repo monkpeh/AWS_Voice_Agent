@@ -12,6 +12,11 @@ import hashlib
 import datetime
 import time
 import inspect
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
 from aws_sdk_bedrock_runtime.client import (
     BedrockRuntimeClient,
     InvokeModelWithBidirectionalStreamOperationInput,
@@ -1252,9 +1257,14 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     args = parser.parse_args()
     # Set your AWS credentials here or use environment variables
-    os.environ["AWS_ACCESS_KEY_ID"] = ""
-    os.environ["AWS_SECRET_ACCESS_KEY"] = ""
-    os.environ["AWS_DEFAULT_REGION"] = ""
+    load_dotenv()
+
+    # Optional safety check (helps you catch missing creds immediately)
+    if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
+        raise ValueError("Missing AWS credentials. Add them to your .env file.")
+
+    # If region isn't set in .env, default to us-east-1
+    os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
     # Run the main function
     try:
