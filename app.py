@@ -1,7 +1,7 @@
 import ast
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-
+import re
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
@@ -27,19 +27,32 @@ TOOL_KEYWORDS = [
 # --------------- PARSING ---------------
 
 
+
+TS_FULL = re.compile(r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3,6})\s+(.*)$")
+TS_SHORT = re.compile(r"^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3,6})\s+(.*)$")
+
+
 def parse_timestamp_and_rest(line: str):
     """
-    Parse a line like:
-    2025-11-23 19:28:34.255 initialize_stream Execution time...
-    into (timestamp_str, rest_of_line).
-    If it doesn't match that pattern, returns (None, stripped_line).
+    Supports BOTH:
+      2026-01-27 21:52:49.067 ...
+      01-27 21:52:49.067 ...
+
+    Returns:
+      (timestamp_str, rest_of_line)
     """
-    parts = line.split(" ", 2)
-    if len(parts) < 3:
-        return None, line.strip()
-    ts = f"{parts[0]} {parts[1]}"
-    rest = parts[2].strip()
-    return ts, rest
+    s = line.rstrip("\r\n")
+
+
+    m = TS_FULL.match(s)
+    if m:
+        return m.group(1), m.group(2).strip()
+
+    m = TS_SHORT.match(s)
+    if m:
+        return m.group(1), m.group(2).strip()
+
+    return None, s.strip()
 
 
 def parse_usage_dict(text: str) -> Optional[Dict[str, Any]]:
@@ -80,73 +93,90 @@ def extract_tool_message(text: str) -> str:
 
 
 def parse_line_to_event(line: str) -> Optional[Dict[str, Any]]:
-    """
-    Convert a single log line into a structured event:
-    - type: 'user', 'assistant', 'event', 'usage', 'tool'
-    - time: timestamp string (may be None for bare User/Assistant lines)
-    - message / label / details...
-    """
-    line = line.rstrip("\n")
+    line = line.rstrip("\r\n")
+
     if not line:
         return None
 
     stripped = line.strip()
 
-    # --- 1) Bare User/Assistant lines (NO timestamp) ---
+    # 1) Bare lines (no timestamp prefix)
     if stripped.startswith("User:"):
-        msg = stripped.split("User:", 1)[1].strip()
-        return {
-            "type": "user",
-            "time": None,
-            "message": msg,
-        }
+        return {"type": "user", "time": None, "message": stripped.split("User:", 1)[1].strip()}
 
     if stripped.startswith("Assistant:"):
-        msg = stripped.split("Assistant:", 1)[1].strip()
+        return {"type": "assistant", "time": None, "message": stripped.split("Assistant:", 1)[1].strip()}
+
+    if stripped.startswith("UsageEvent:"):
+        # This parses correctly even without a timestamp
+        usage_dict = parse_usage_dict(stripped)
+        input_tokens = output_tokens = total_tokens = None
+        completion_id = None
+
+        if usage_dict and "usageEvent" in usage_dict:
+            ue = usage_dict["usageEvent"]
+            completion_id = ue.get("completionId")
+            total = ue.get("details", {}).get("total", {})
+            inp = total.get("input", {})
+            out = total.get("output", {})
+
+            input_tokens = (inp.get("speechTokens", 0) or 0) + (inp.get("textTokens", 0) or 0)
+            output_tokens = (out.get("speechTokens", 0) or 0) + (out.get("textTokens", 0) or 0)
+            total_tokens = ue.get("totalTokens")
+
         return {
-            "type": "assistant",
+            "type": "usage",
             "time": None,
-            "message": msg,
+            "completion_id": completion_id,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
         }
 
-    # Bare tool line without timestamp
-    if is_tool_line(stripped):
-        return {
-            "type": "tool",
-            "time": None,
-            "message": extract_tool_message(stripped),
-        }
-
-    # --- 2) Timestamped lines ---
+    # 2) Timestamped lines
     ts, rest = parse_timestamp_and_rest(line)
 
-    # User speech/text embedded in a timestamped line
+    # If timestamp parse failed, fall back to scanning the whole line
+    if ts is None:
+        if "User:" in stripped:
+            return {"type": "user", "time": None, "message": stripped.split("User:", 1)[1].strip()}
+        if "Assistant:" in stripped:
+            return {"type": "assistant", "time": None, "message": stripped.split("Assistant:", 1)[1].strip()}
+        if "UsageEvent:" in stripped:
+            # same as above but no timestamp
+            usage_dict = parse_usage_dict(stripped)
+            input_tokens = output_tokens = total_tokens = None
+            completion_id = None
+
+            if usage_dict and "usageEvent" in usage_dict:
+                ue = usage_dict["usageEvent"]
+                completion_id = ue.get("completionId")
+                total = ue.get("details", {}).get("total", {})
+                inp = total.get("input", {})
+                out = total.get("output", {})
+
+                input_tokens = (inp.get("speechTokens", 0) or 0) + (inp.get("textTokens", 0) or 0)
+                output_tokens = (out.get("speechTokens", 0) or 0) + (out.get("textTokens", 0) or 0)
+                total_tokens = ue.get("totalTokens")
+
+            return {
+                "type": "usage",
+                "time": None,
+                "completion_id": completion_id,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+            }
+        return None
+
+    # Now we're safely in timestamped "rest"
+
     if "User:" in rest:
-        msg = rest.split("User:", 1)[1].strip()
-        return {
-            "type": "user",
-            "time": ts,
-            "message": msg,
-        }
+        return {"type": "user", "time": ts, "message": rest.split("User:", 1)[1].strip()}
 
-    # Assistant speech/text embedded in a timestamped line
     if "Assistant:" in rest:
-        msg = rest.split("Assistant:", 1)[1].strip()
-        return {
-            "type": "assistant",
-            "time": ts,
-            "message": msg,
-        }
+        return {"type": "assistant", "time": ts, "message": rest.split("Assistant:", 1)[1].strip()}
 
-    # Tool usage embedded in a timestamped line
-    if is_tool_line(rest):
-        return {
-            "type": "tool",
-            "time": ts,
-            "message": extract_tool_message(rest),
-        }
-
-    # Usage events
     if "UsageEvent:" in rest:
         usage_dict = parse_usage_dict(rest)
         input_tokens = output_tokens = total_tokens = None
@@ -159,12 +189,8 @@ def parse_line_to_event(line: str) -> Optional[Dict[str, Any]]:
             inp = total.get("input", {})
             out = total.get("output", {})
 
-            input_tokens = (inp.get("speechTokens", 0) or 0) + (
-                inp.get("textTokens", 0) or 0
-            )
-            output_tokens = (out.get("speechTokens", 0) or 0) + (
-                out.get("textTokens", 0) or 0
-            )
+            input_tokens = (inp.get("speechTokens", 0) or 0) + (inp.get("textTokens", 0) or 0)
+            output_tokens = (out.get("speechTokens", 0) or 0) + (out.get("textTokens", 0) or 0)
             total_tokens = ue.get("totalTokens")
 
         return {
@@ -176,26 +202,21 @@ def parse_line_to_event(line: str) -> Optional[Dict[str, Any]]:
             "total_tokens": total_tokens,
         }
 
-    # Completion start
-    if "completionStart" in rest:
+    # Tool detection — make it strict so it doesn't match everything
+    low = rest.lower()
+    if "tool use detected" in low or low.startswith("tool:") or low.startswith("tool use"):
+        return {"type": "tool", "time": ts, "message": rest}
+
+    # Event markers (optional)
+    if "completionstart" in low:
         return {"type": "event", "time": ts, "label": "Completion started"}
-
-    # Barge-in
-    if "Barge-in detected" in rest:
-        return {
-            "type": "event",
-            "time": ts,
-            "label": "Barge-in detected (user interrupted)",
-        }
-
-    # Content markers
-    if "Content start detected" in rest:
+    if "barge-in detected" in low:
+        return {"type": "event", "time": ts, "label": "Barge-in detected (user interrupted)"}
+    if "content start detected" in low:
         return {"type": "event", "time": ts, "label": "Content start detected"}
-
-    if "Content end" in rest:
+    if "content end" in low or "contentend" in low:
         return {"type": "event", "time": ts, "label": "Content end"}
 
-    # Ignore everything else
     return None
 
 
@@ -209,7 +230,7 @@ def parse_log_file(
     events: List[Dict[str, Any]] = []
 
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(path, "r", encoding="utf-16", errors="ignore") as f:
             for line in f:
                 ev = parse_line_to_event(line)
                 if ev is not None:
@@ -240,11 +261,29 @@ with st.sidebar:
     )
 
 log_file = Path(log_path)
+
+st.sidebar.markdown("### Debug")
+st.sidebar.code(f"cwd = {Path.cwd()}")
+st.sidebar.code(f"log_path = {log_path}")
+st.sidebar.code(f"resolved = {log_file.resolve()}")
+st.sidebar.code(f"size_bytes = {log_file.stat().st_size if log_file.exists() else 'MISSING'}")
+
 if not log_file.exists():
     st.error(f"Log file not found at: `{log_file.resolve()}`")
     st.stop()
 
+
 events = parse_log_file(str(log_file), limit=MAX_EVENTS)
+# TEMP DEBUG: show first 10 raw log lines in sidebar
+with open(str(log_file), "r", encoding="utf-16", errors="ignore") as f:
+    sample = [next(f) for _ in range(10)]
+
+st.sidebar.write("events_count", len(events))
+st.sidebar.write(sample)
+if events:
+    st.sidebar.write("first_event", events[0])
+    st.sidebar.write("last_event", events[-1])
+
 
 if not events:
     st.warning("No parsed conversation events yet. Speak to the agent.")

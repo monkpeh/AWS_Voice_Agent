@@ -1,3 +1,4 @@
 .env
+assistant.log
 *.csv
 secrets*

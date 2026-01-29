@@ -880,24 +880,25 @@ class BedrockStreamManager:
                                                 "Error parsing additionalModelFields"
                                             )
                                 elif "textOutput" in json_data["event"]:
-                                    text_content = json_data["event"]["textOutput"][
-                                        "content"
-                                    ]
-                                    role = json_data["event"]["textOutput"]["role"]
-                                    # Check if there is a barge-in
-                                    if '{ "interrupted" : true }' in text_content:
-                                        debug_print(
-                                            "Barge-in detected. Stopping audio output."
-                                        )
-                                        self.barge_in = True
+                                    text_out = json_data["event"]["textOutput"]
+                                    text_content = (text_out.get("content") or "").strip()
+                                    role = (text_out.get("role") or self.role or "").upper()
 
-                                    if (
-                                        self.role == "ASSISTANT"
-                                        and self.display_assistant_text
-                                    ):
-                                        print(f"Assistant: {text_content}")
-                                    elif self.role == "USER":
-                                        print(f"User: {text_content}")
+                                    if not text_content:
+                                        continue
+
+                                    # barge-in marker
+                                    if '{ "interrupted" : true }' in text_content:
+                                        debug_print("Barge-in detected. Stopping audio output.")
+                                        self.barge_in = True
+                                        continue
+
+                                    if role == "ASSISTANT":
+                                        print(f"Assistant: {text_content}", flush=True)
+                                    elif role == "USER":
+                                        print(f"User: {text_content}", flush=True)
+                                    else:
+                                        debug_print(f"textOutput role={role}: {text_content}")
                                 elif "audioOutput" in json_data["event"]:
                                     audio_content = json_data["event"]["audioOutput"][
                                         "content"
@@ -938,7 +939,7 @@ class BedrockStreamManager:
                                     # Handle end of conversation, no more response will be generated
                                     debug_print("End of response sequence")
                                 elif "usageEvent" in json_data["event"]:
-                                    debug_print(f"UsageEvent: {json_data['event']}")
+                                    print(f"UsageEvent: {json_data['event']}", flush=True)
                             # Put the response in the output queue for other components
                             await self.output_queue.put(json_data)
                         except json.JSONDecodeError:
